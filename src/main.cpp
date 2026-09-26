@@ -65,7 +65,7 @@ void ApplyPoolCueBoost(BoostMode mode) {
 
 // GUI Rendering Logic (Dear ImGui)
 void RenderPoolCueBoosterGUI() {
-    ImGui::SetNextWindowSize(ImVec4(420, 380), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(420.0f, 380.0f), ImGuiCond_FirstUseEver);
     
     // Styling Modern Dark Gold
     ImGuiStyle& style = ImGui::GetStyle();
