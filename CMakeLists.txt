@@ -4,7 +4,6 @@ project(PoolCueBooster CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# ดึง ImGui เข้ามาในโปรเจกต์อัตโนมัติผ่าน FetchContent
 include(FetchContent)
 FetchContent_Declare(
     imgui
@@ -13,7 +12,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui)
 
-# รวมไฟล์ Source Code ของ ImGui ที่จำเป็น
 set(IMGUI_SOURCES
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -23,14 +21,12 @@ set(IMGUI_SOURCES
     ${imgui_SOURCE_DIR}/backends/imgui_impl_dx11.cpp
 )
 
-# กำหนดไฟล์ Executable
-add_executable(PoolCueBooster src/main.cpp ${IMGUI_SOURCES})
+# เติม WIN32 เพื่อให้เป็น GUI Subsystem (ซ่อนหน้าต่าง CMD)
+add_executable(PoolCueBooster WIN32 src/main.cpp ${IMGUI_SOURCES})
 
-# Include Headers
 target_include_directories(PoolCueBooster PRIVATE 
     ${imgui_SOURCE_DIR} 
     ${imgui_SOURCE_DIR}/backends
 )
 
-# Link Libraries ของ Windows และ DirectX 11
 target_link_libraries(PoolCueBooster PRIVATE d3d11 d3dcompiler dwmapi)
