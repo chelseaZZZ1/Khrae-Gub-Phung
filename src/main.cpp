@@ -1,11 +1,12 @@
 #include <iostream>
 #include <windows.h>
 #include <d3d11.h>
+#include <cmath>
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
 
-// Forward Declarations & Win32 Event Handler
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 static ID3D11Device*            g_pd3dDevice = nullptr;
@@ -35,12 +36,11 @@ enum BoostMode {
 struct BoostSettings {
     const char* name;
     const char* subtitle;
-    float forceMultiplier;      // Force Multiplier
-    float moveSpeedMultiplier;   // Movement Speed
-    ImVec4 color;                // Color Accent
+    float forceMultiplier;
+    float moveSpeedMultiplier;
+    ImVec4 color;
 };
 
-// Mode Configurations (English Only)
 BoostSettings g_BoostConfigs[] = {
     { "DISABLED",       "Default Engine Profile",          1.0f,  1.0f, ImVec4(0.45f, 0.48f, 0.55f, 1.0f) },
     { "LOW BOOST",      "Stealth Mode / Safe Stream",      1.25f, 1.10f, ImVec4(0.20f, 0.80f, 0.40f, 1.0f) },
@@ -51,12 +51,21 @@ BoostSettings g_BoostConfigs[] = {
     { "SYSTEM RESET",   "Restore Native Defaults",        1.0f,  1.0f, ImVec4(0.00f, 0.85f, 1.00f, 1.0f) }
 };
 
-// Global State Variables
+// Global States & Animation Memory
 BoostMode g_CurrentMode = MODE_OFF;
 bool g_IsActive = false;
-uint32_t POOL_CUE_HASH = 0x94F28797;
 float g_CustomForce = 1.0f;
 float g_CustomSpeed = 1.0f;
+
+// Animation & State tracking for each mode
+struct ModeAnimState {
+    float hoverAnim = 0.0f;     // 0.0 -> 1.0 smooth hover
+    bool  isApplying = false;   // Loading Spinner state
+    float applyTimer = 0.0f;    // Duration timer
+    bool  justSuccess = false;  // Checkmark state
+    float successTimer = 0.0f;
+};
+ModeAnimState g_AnimStates[7];
 
 void ApplyPoolCueBoost(BoostMode mode) {
     if (mode == MODE_SYSTEM_RESET) {
@@ -76,175 +85,255 @@ void ApplyPoolCueBoost(BoostMode mode) {
 }
 
 // ---------------------------------------------------------
-// Ultra Modern Custom Styling (Dark Cyber Gold / Sleek UI)
+// Custom Animated Components (Hover Glow + Spinner + Checkmark)
+// ---------------------------------------------------------
+bool AnimatedModeButton(int id, const char* label, const char* sublabel, ImVec4 accentColor, ImVec2 size) {
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    if (window->SkipItems) return false;
+
+    ImGuiContext& g = *GImGui;
+    const ImGuiStyle& style = g.Style;
+    const ImGuiID btnId = window->GetID(id);
+
+    ImVec2 pos = window->DC.CursorPos;
+    ImRect bb(pos, ImVec2(pos.x + size.x, pos.y + size.y));
+    ImGui::ItemSize(size, style.FramePadding.y);
+    if (!ImGui::ItemAdd(bb, btnId)) return false;
+
+    bool hovered, held;
+    bool pressed = ImGui::ButtonBehavior(bb, btnId, &hovered, &held);
+
+    ModeAnimState& anim = g_AnimStates[id];
+
+    // Smooth Hover Interpolation (Lerp)
+    float delta = g.IO.DeltaTime * 10.0f; // Speed of animation
+    anim.hoverAnim = ImLerp(anim.hoverAnim, hovered ? 1.0f : 0.0f, ImClamp(delta, 0.0f, 1.0f));
+
+    // Handle Loading State Timers
+    if (pressed && !anim.isApplying) {
+        anim.isApplying = true;
+        anim.applyTimer = 0.6f; // 0.6 seconds spinning effect
+    }
+
+    if (anim.isApplying) {
+        anim.applyTimer -= g.IO.DeltaTime;
+        if (anim.applyTimer <= 0.0f) {
+            anim.isApplying = false;
+            anim.justSuccess = true;
+            anim.successTimer = 1.2f; // Show checkmark for 1.2 seconds
+            ApplyPoolCueBoost((BoostMode)id);
+        }
+    }
+
+    if (anim.justSuccess) {
+        anim.successTimer -= g.IO.DeltaTime;
+        if (anim.successTimer <= 0.0f) {
+            anim.justSuccess = false;
+        }
+    }
+
+    // Render Base Card Background
+    bool isActiveMode = (g_CurrentMode == id);
+    ImU32 bgColor = ImGui::GetColorU32(isActiveMode 
+        ? ImVec4(accentColor.x * 0.3f, accentColor.y * 0.3f, accentColor.z * 0.3f, 0.85f)
+        : ImLerp(ImVec4(0.11f, 0.12f, 0.16f, 0.90f), ImVec4(0.18f, 0.20f, 0.26f, 0.95f), anim.hoverAnim));
+    
+    window->DrawList->AddRectFilled(bb.Min, bb.Max, bgColor, 8.0f);
+
+    // Render Selection Hover Glow Edge (Left Bar & Border)
+    if (anim.hoverAnim > 0.01f || isActiveMode) {
+        float barWidth = ImLerp(2.0f, 6.0f, anim.hoverAnim);
+        if (isActiveMode) barWidth = 6.0f;
+        ImU32 glowColor = ImGui::GetColorU32(accentColor);
+        
+        // Left Glow Strip
+        window->DrawList->AddRectFilled(
+            bb.Min, 
+            ImVec2(bb.Min.x + barWidth, bb.Max.y), 
+            glowColor, 8.0f, ImDrawFlags_RoundCornersLeft);
+
+        // Subtle Border Glow
+        window->DrawList->AddRect(bb.Min, bb.Max, ImGui::GetColorU32(ImVec4(accentColor.x, accentColor.y, accentColor.z, anim.hoverAnim * 0.6f)), 8.0f, 0, 1.5f);
+    }
+
+    // Render Loading Spinner OR Checkmark OR Normal Text
+    ImVec2 textPos = ImVec2(bb.Min.x + 18.0f, bb.Min.y + 8.0f);
+
+    if (anim.isApplying) {
+        // --- SPINNER ANIMATION ---
+        float radius = 10.0f;
+        ImVec2 center = ImVec2(bb.Max.x - 30.0f, bb.Min.y + size.y * 0.5f);
+        float time = (float)g.Time * 8.0f;
+        window->DrawList->PathClear();
+        int num_segments = 20;
+        for (int i = 0; i < num_segments; i++) {
+            float a = time + ((float)i / (float)num_segments) * (IM_PI * 1.5f);
+            window->DrawList->PathLineTo(ImVec2(center.x + cosf(a) * radius, center.y + sinf(a) * radius));
+        }
+        window->DrawList->PathStroke(ImGui::GetColorU32(accentColor), false, 3.0f);
+
+        ImGui::RenderText(textPos, label);
+        ImGui::RenderText(ImVec2(textPos.x, textPos.y + 18.0f), sublabel);
+    } 
+    else if (anim.justSuccess) {
+        // --- CHECKMARK ANIMATION ---
+        ImVec2 center = ImVec2(bb.Max.x - 30.0f, bb.Min.y + size.y * 0.5f);
+        ImU32 greenColor = IM_COL32(50, 220, 100, 255);
+        window->DrawList->AddCircleFilled(center, 11.0f, greenColor);
+        // Draw Check mark lines
+        window->DrawList->AddLine(ImVec2(center.x - 5, center.y), ImVec2(center.x - 1, center.y + 4), IM_COL32(255, 255, 255, 255), 2.5f);
+        window->DrawList->AddLine(ImVec2(center.x - 1, center.y + 4), ImVec2(center.x + 5, center.y - 4), IM_COL32(255, 255, 255, 255), 2.5f);
+
+        ImGui::RenderText(textPos, label);
+        ImGui::RenderText(ImVec2(textPos.x, textPos.y + 18.0f), sublabel);
+    } 
+    else {
+        // Normal Text
+        window->DrawList->AddText(textPos, IM_COL32(240, 240, 245, 255), label);
+        window->DrawList->AddText(ImVec2(textPos.x, textPos.y + 18.0f), IM_COL32(130, 135, 150, 255), sublabel);
+    }
+
+    return pressed;
+}
+
+// ---------------------------------------------------------
+// Styling Setup
 // ---------------------------------------------------------
 void SetupModernStyle() {
     ImGuiStyle& style = ImGui::GetStyle();
 
-    // Smooth Curved Geometries
-    style.WindowRounding    = 14.0f;
-    style.ChildRounding     = 10.0f;
+    style.WindowRounding    = 16.0f;
+    style.ChildRounding     = 12.0f;
     style.FrameRounding     = 8.0f;
-    style.PopupRounding     = 10.0f;
-    style.ScrollbarRounding = 12.0f;
-    style.GrabRounding      = 6.0f;
-    style.TabRounding       = 8.0f;
+    style.WindowPadding     = ImVec2(20, 20);
+    style.ItemSpacing       = ImVec2(10, 12);
+    style.WindowBorderSize  = 0.0f; // Frameless look
 
-    // Comfort Padding & Spacing
-    style.WindowPadding     = ImVec2(18, 18);
-    style.FramePadding      = ImVec2(12, 8);
-    style.ItemSpacing       = ImVec2(10, 10);
-    style.ItemInnerSpacing  = ImVec2(8, 8);
-    style.ScrollbarSize     = 10.0f;
-    style.WindowBorderSize  = 1.0f;
-
-    // Dark Cyber Gold Palette
     ImVec4* colors = style.Colors;
-    colors[ImGuiCol_WindowBg]           = ImVec4(0.06f, 0.06f, 0.08f, 0.98f);
-    colors[ImGuiCol_ChildBg]            = ImVec4(0.09f, 0.09f, 0.12f, 0.80f);
-    colors[ImGuiCol_PopupBg]            = ImVec4(0.08f, 0.08f, 0.10f, 0.95f);
-    colors[ImGuiCol_Border]             = ImVec4(0.20f, 0.22f, 0.28f, 0.50f);
-    colors[ImGuiCol_BorderShadow]       = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    colors[ImGuiCol_WindowBg]           = ImVec4(0.06f, 0.06f, 0.08f, 0.95f); // Sleek Dark BG
+    colors[ImGuiCol_ChildBg]            = ImVec4(0.09f, 0.10f, 0.13f, 0.80f);
+    colors[ImGuiCol_SliderGrab]         = ImVec4(0.95f, 0.75f, 0.18f, 1.00f);
+    colors[ImGuiCol_SliderGrabActive]   = ImVec4(1.00f, 0.85f, 0.25f, 1.00f);
     colors[ImGuiCol_FrameBg]            = ImVec4(0.12f, 0.13f, 0.17f, 1.00f);
     colors[ImGuiCol_FrameBgHovered]     = ImVec4(0.18f, 0.20f, 0.26f, 1.00f);
-    colors[ImGuiCol_FrameBgActive]      = ImVec4(0.22f, 0.25f, 0.32f, 1.00f);
-    colors[ImGuiCol_TitleBg]            = ImVec4(0.06f, 0.06f, 0.08f, 1.00f);
-    colors[ImGuiCol_TitleBgActive]      = ImVec4(0.08f, 0.08f, 0.11f, 1.00f);
-    colors[ImGuiCol_TitleBgCollapsed]   = ImVec4(0.06f, 0.06f, 0.08f, 1.00f);
-    colors[ImGuiCol_MenuBarBg]          = ImVec4(0.10f, 0.10f, 0.13f, 1.00f);
-
-    // Accent Colors - Gold / Amber / Cyan
-    colors[ImGuiCol_ScrollbarBg]        = ImVec4(0.06f, 0.06f, 0.08f, 0.50f);
-    colors[ImGuiCol_ScrollbarGrab]      = ImVec4(0.22f, 0.24f, 0.30f, 1.00f);
-    colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.35f, 0.38f, 0.48f, 1.00f);
-    colors[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.85f, 0.68f, 0.15f, 1.00f);
-
-    colors[ImGuiCol_CheckMark]          = ImVec4(0.95f, 0.75f, 0.18f, 1.00f);
-    colors[ImGuiCol_SliderGrab]         = ImVec4(0.85f, 0.68f, 0.15f, 1.00f);
-    colors[ImGuiCol_SliderGrabActive]   = ImVec4(1.00f, 0.82f, 0.25f, 1.00f);
-
-    colors[ImGuiCol_Button]             = ImVec4(0.14f, 0.15f, 0.20f, 1.00f);
-    colors[ImGuiCol_ButtonHovered]      = ImVec4(0.22f, 0.24f, 0.32f, 1.00f);
-    colors[ImGuiCol_ButtonActive]       = ImVec4(0.85f, 0.68f, 0.15f, 1.00f);
-
-    colors[ImGuiCol_Header]             = ImGui::ColorConvertU32ToFloat4(0x40302518);
-    colors[ImGuiCol_HeaderHovered]      = ImVec4(0.25f, 0.27f, 0.36f, 1.00f);
-    colors[ImGuiCol_HeaderActive]       = ImVec4(0.85f, 0.68f, 0.15f, 1.00f);
-
-    colors[ImGuiCol_Separator]          = ImVec4(0.20f, 0.22f, 0.28f, 0.60f);
-    colors[ImGuiCol_SeparatorHovered]   = ImVec4(0.85f, 0.68f, 0.15f, 0.80f);
-    colors[ImGuiCol_SeparatorActive]    = ImVec4(0.95f, 0.75f, 0.18f, 1.00f);
-
     colors[ImGuiCol_Text]               = ImVec4(0.92f, 0.93f, 0.96f, 1.00f);
-    colors[ImGuiCol_TextDisabled]       = ImVec4(0.45f, 0.48f, 0.55f, 1.00f);
 }
 
 // ---------------------------------------------------------
 // Custom UI Renderer
 // ---------------------------------------------------------
-void RenderPoolCueBoosterGUI() {
-    ImGui::SetNextWindowSize(ImVec2(480.0f, 540.0f), ImGuiCond_FirstUseEver);
+void RenderPoolCueBoosterGUI(HWND hwnd) {
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
 
-    ImGui::Begin("POOL CUE ULTRA BOOSTER v2.0", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
+    ImGui::Begin("##MainFramelessWindow", nullptr, 
+        ImGuiWindowFlags_NoTitleBar | 
+        ImGuiWindowFlags_NoResize | 
+        ImGuiWindowFlags_NoMove | 
+        ImGuiWindowFlags_NoCollapse);
 
-    // Header Title Area
+    // --- CUSTOM TITLE BAR & DRAG ZONE ---
+    ImGui::BeginGroup();
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.00f, 0.82f, 0.20f, 1.0f));
-    ImGui::TextUnformatted("FIVEM POOL CUE POWER MODIFICATION");
+    ImGui::TextUnformatted("⚡ POOL CUE ULTRA BOOSTER v2.0");
     ImGui::PopStyleColor();
+    ImGui::SameLine(ImGui::GetWindowWidth() - 35);
 
-    ImGui::TextColored(ImVec4(0.50f, 0.53f, 0.60f, 1.0f), "Engine Core Memory & Native Controller");
-    ImGui::Spacing();
+    // Custom Exit Button (X)
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.2f, 0.2f, 0.8f));
+    if (ImGui::Button("X", ImVec2(25, 25))) {
+        ::PostQuitMessage(0);
+    }
+    ImGui::PopStyleColor(2);
+    ImGui::EndGroup();
+
+    // Allow window dragging from header
+    if (ImGui::IsItemHovered() && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        ::ReleaseCapture();
+        ::SendMessage(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+    }
+
+    ImGui::TextColored(ImVec4(0.45f, 0.48f, 0.55f, 1.0f), "Memory Native Engine Overdrive");
     ImGui::Separator();
     ImGui::Spacing();
 
-    // Status Panel Child Window
-    ImGui::BeginChild("StatusPanel", ImVec2(0, 65), true);
+    // --- STATUS PANEL ---
+    ImGui::BeginChild("StatusPanel", ImVec2(0, 58), true);
     {
-        ImGui::Text("ENGINE STATUS:");
+        ImGui::Text("STATUS:");
         ImGui::SameLine();
         if (g_IsActive) {
             ImGui::TextColored(g_BoostConfigs[g_CurrentMode].color, "[ ACTIVE - %s ]", g_BoostConfigs[g_CurrentMode].name);
-            ImGui::TextColored(ImVec4(0.70f, 0.73f, 0.80f, 1.0f), "Profile Note: %s", g_BoostConfigs[g_CurrentMode].subtitle);
+            ImGui::TextColored(ImVec4(0.6f, 0.65f, 0.75f, 1.0f), "Profile: %s", g_BoostConfigs[g_CurrentMode].subtitle);
         } else {
             ImGui::TextColored(ImVec4(0.45f, 0.48f, 0.55f, 1.0f), "[ STANDBY / INACTIVE ]");
-            ImGui::TextColored(ImVec4(0.40f, 0.43f, 0.50f, 1.0f), "Select an operational mode below to initialize.");
         }
     }
     ImGui::EndChild();
 
     ImGui::Spacing();
-    ImGui::TextColored(ImVec4(0.85f, 0.68f, 0.15f, 1.00f), "SELECT BOOST PROFILE:");
+    ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.18f, 1.00f), "SELECT BOOST PROFILE:");
 
-    // Mode Buttons Grid
+    // --- ANIMATED MODE BUTTONS ---
     for (int i = 1; i <= 5; ++i) {
-        ImGui::PushID(i);
-        bool isSelected = (g_CurrentMode == i);
-        if (isSelected) {
-            ImGui::PushStyleColor(ImGuiCol_Button, g_BoostConfigs[i].color);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, g_BoostConfigs[i].color);
-        } else {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.13f, 0.17f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.22f, 0.28f, 1.00f));
-        }
-
-        if (ImGui::Button(g_BoostConfigs[i].name, ImVec2(-1, 38))) {
-            ApplyPoolCueBoost((BoostMode)i);
-        }
-
-        ImGui::PopStyleColor(2);
-        ImGui::PopID();
+        AnimatedModeButton(
+            i, 
+            g_BoostConfigs[i].name, 
+            g_BoostConfigs[i].subtitle, 
+            g_BoostConfigs[i].color, 
+            ImVec2(-1, 46)
+        );
     }
 
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
 
-    // Live Fine-Tuning Multipliers
-    ImGui::TextColored(ImVec4(0.85f, 0.68f, 0.15f, 1.00f), "LIVE ADJUSTMENT TUNING:");
+    // --- FINE TUNING SLIDERS ---
+    ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.18f, 1.00f), "LIVE TUNING SLIDERS:");
     ImGui::SliderFloat("Force Multiplier", &g_CustomForce, 1.0f, 10.0f, "%.2fx Force");
     ImGui::SliderFloat("Speed Multiplier", &g_CustomSpeed, 1.0f, 3.0f, "%.2fx Speed");
 
     ImGui::Spacing();
-    ImGui::Spacing();
 
-    // System Reset Action Button
+    // --- RESET BUTTON ---
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f, 0.12f, 0.15f, 0.70f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.90f, 0.18f, 0.22f, 1.00f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.00f, 0.25f, 0.30f, 1.00f));
-    if (ImGui::Button("SYSTEM RESET & FLUSH MEMORY", ImVec2(-1, 42))) {
+    if (ImGui::Button("SYSTEM RESET & FLUSH MEMORY", ImVec2(-1, 40))) {
         ApplyPoolCueBoost(MODE_SYSTEM_RESET);
     }
-    ImGui::PopStyleColor(3);
+    ImGui::PopStyleColor(2);
 
     ImGui::End();
 }
 
-// ---------------------------------------------------------
-// Smooth Font Setup Function
-// ---------------------------------------------------------
 void SetupSmoothFonts(ImGuiIO& io) {
     ImFontConfig font_cfg;
-    font_cfg.OversampleH = 4; // High Horizontal Anti-Aliasing
-    font_cfg.OversampleV = 4; // High Vertical Anti-Aliasing
-    font_cfg.PixelSnapH = false;
+    font_cfg.OversampleH = 4;
+    font_cfg.OversampleV = 4;
 
-    // Attempt to load clean Windows system font (Segoe UI / Tahoma)
     ImFont* font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 17.0f, &font_cfg);
-    if (font == nullptr) {
-        font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\tahoma.ttf", 17.0f, &font_cfg);
-    }
-    if (font == nullptr) {
-        io.Fonts->AddFontDefault(&font_cfg); // Fallback
-    }
+    if (!font) io.Fonts->AddFontDefault(&font_cfg);
 }
 
 // ---------------------------------------------------------
-// Main Entry Point (Win32 + DirectX 11)
+// WinMain Entry Point (No CMD Window / Frameless)
 // ---------------------------------------------------------
-int main(int, char**) {
-    WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, L"PoolCueBoosterClass", nullptr };
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    // Register Window Class
+    WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, hInstance, nullptr, nullptr, nullptr, nullptr, L"PoolCueBoosterClass", nullptr };
     ::RegisterClassExW(&wc);
-    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"POOL CUE ULTRA BOOSTER v2.0", WS_OVERLAPPEDWINDOW, 100, 100, 520, 580, nullptr, nullptr, wc.hInstance, nullptr);
+
+    // Create Frameless Window (WS_POPUP)
+    HWND hwnd = ::CreateWindowExW(
+        WS_EX_APPWINDOW,
+        wc.lpszClassName, 
+        L"POOL CUE ULTRA BOOSTER v2.0", 
+        WS_POPUP | WS_VISIBLE, 
+        200, 200, 480, 580, 
+        nullptr, nullptr, wc.hInstance, nullptr
+    );
 
     if (!CreateDeviceD3D(hwnd)) {
         CleanupDeviceD3D();
@@ -280,10 +369,10 @@ int main(int, char**) {
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        RenderPoolCueBoosterGUI();
+        RenderPoolCueBoosterGUI(hwnd);
 
         ImGui::Render();
-        const float clear_color_with_alpha[4] = { 0.04f, 0.04f, 0.05f, 1.00f };
+        const float clear_color_with_alpha[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
         g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
         g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color_with_alpha);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
