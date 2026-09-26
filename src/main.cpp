@@ -21,7 +21,7 @@ void CleanupRenderTarget();
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 // ---------------------------------------------------------
-// Engine Logic & Config Enums
+// Core Engine Enums & State Management
 // ---------------------------------------------------------
 enum BoostMode {
     MODE_OFF = 0,
@@ -36,26 +36,28 @@ enum BoostMode {
 struct BoostSettings {
     const char* name;
     const char* subtitle;
+    const char* description;
     float forceMultiplier;
     float moveSpeedMultiplier;
     ImVec4 color;
 };
 
 BoostSettings g_BoostConfigs[] = {
-    { "DISABLED",       "Default Engine Profile",          1.0f,  1.0f, ImVec4(0.45f, 0.48f, 0.55f, 1.0f) },
-    { "LOW BOOST",      "Stealth Mode / Safe Stream",      1.25f, 1.10f, ImVec4(0.20f, 0.80f, 0.40f, 1.0f) },
-    { "ROLEPLAY REAL",  "Balanced Physics & Speed",       1.50f, 1.15f, ImVec4(0.15f, 0.65f, 1.00f, 1.0f) },
-    { "MEDIUM POWER",   "High Impact Multiplier",         2.00f, 1.30f, ImVec4(1.00f, 0.75f, 0.00f, 1.0f) },
-    { "HIGH BEAST",     "Aggressive Engine Overdrive",    3.50f, 1.60f, ImVec4(1.00f, 0.35f, 0.00f, 1.0f) },
-    { "FULL GOD MODE",  "Maximum Power / Unrestricted",   10.0f, 2.20f, ImVec4(0.95f, 0.15f, 0.20f, 1.0f) },
-    { "SYSTEM RESET",   "Restore Native Defaults",        1.0f,  1.0f, ImVec4(0.00f, 0.85f, 1.00f, 1.0f) }
+    { "OFF",            "Engine Disabled",      "Standard game physics with zero modifications.",                     1.0f,  1.0f, ImVec4(0.45f, 0.48f, 0.55f, 1.0f) },
+    { "STEALTH",        "Safe Stream Profile",  "Low profile boost suitable for stealth gameplay and streaming.",    1.25f, 1.10f, ImVec4(0.20f, 0.80f, 0.40f, 1.0f) },
+    { "ROLEPLAY",       "Balanced Physics",     "Optimized for smooth roleplay interactions with minor boosts.",      1.50f, 1.15f, ImVec4(0.15f, 0.65f, 1.00f, 1.0f) },
+    { "BALANCED",       "High Impact Mode",     "Noticeable boost to movement speed and impulse forces.",             2.00f, 1.30f, ImVec4(1.00f, 0.75f, 0.00f, 1.0f) },
+    { "OVERDRIVE",      "Aggressive Engine",    "Extreme physics amplification for intense situations.",              3.50f, 1.60f, ImVec4(1.00f, 0.35f, 0.00f, 1.0f) },
+    { "UNRESTRICTED",   "Maximum Output",       "Uncapped power output. Complete physics displacement.",              10.0f, 2.20f, ImVec4(0.95f, 0.15f, 0.20f, 1.0f) },
+    { "SYSTEM RESET",   "Restore Defaults",     "Flushes active memory hooks and reverts to stock engine state.",    1.0f,  1.0f, ImVec4(0.00f, 0.85f, 1.00f, 1.0f) }
 };
 
-// Global States & Animation Memory
+// Global App States
 BoostMode g_CurrentMode = MODE_OFF;
 bool g_IsActive = false;
 float g_CustomForce = 1.0f;
 float g_CustomSpeed = 1.0f;
+int g_CurrentTab = 0; // 0: Overview, 1: Profiles, 2: Fine Tuning
 
 struct ModeAnimState {
     float hoverAnim = 0.0f;     
@@ -84,9 +86,52 @@ void ApplyPoolCueBoost(BoostMode mode) {
 }
 
 // ---------------------------------------------------------
-// Custom Animated Components (Fixed Hitbox & Hold Selection)
+// Custom Animated UI Widgets
 // ---------------------------------------------------------
-bool AnimatedModeButton(int id, const char* label, const char* sublabel, ImVec4 accentColor, ImVec2 size) {
+
+// Custom Modern Toggle Switch
+bool RenderToggleSwitch(const char* label, bool* v) {
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    if (window->SkipItems) return false;
+
+    ImGuiContext& g = *GImGui;
+    const ImGuiStyle& style = g.Style;
+    const ImGuiID id = window->GetID(label);
+    
+    ImVec2 label_size = ImGui::CalcTextSize(label, NULL, true);
+    ImVec2 pos = window->DC.CursorPos;
+    float height = 22.0f;
+    float width = 42.0f;
+
+    ImRect bb(pos, ImVec2(pos.x + width + (label_size.x > 0.0f ? style.ItemInnerSpacing.x + label_size.x : 0.0f), pos.y + height));
+    ImGui::ItemSize(bb, style.FramePadding.y);
+    if (!ImGui::ItemAdd(bb, id)) return false;
+
+    bool hovered, held;
+    bool pressed = ImGui::ButtonBehavior(bb, id, &hovered, &held);
+    if (pressed) {
+        *v = !(*v);
+        ImGui::MarkItemEdited(id);
+    }
+
+    float t = *v ? 1.0f : 0.0f;
+    ImU32 bg_color = *v ? IM_COL32(40, 200, 100, 255) : IM_COL32(50, 55, 65, 255);
+    
+    ImRect switch_bb(pos, ImVec2(pos.x + width, pos.y + height));
+    window->DrawList->AddRectFilled(switch_bb.Min, switch_bb.Max, bg_color, height * 0.5f);
+    
+    float knob_pos_x = *v ? (switch_bb.Max.x - height * 0.5f) : (switch_bb.Min.x + height * 0.5f);
+    window->DrawList->AddCircleFilled(ImVec2(knob_pos_x, switch_bb.Min.y + height * 0.5f), (height * 0.5f) - 3.0f, IM_COL32(255, 255, 255, 255));
+
+    if (label_size.x > 0.0f) {
+        ImGui::RenderText(ImVec2(switch_bb.Max.x + style.ItemInnerSpacing.x, pos.y + (height - label_size.y) * 0.5f), label);
+    }
+
+    return pressed;
+}
+
+// Custom Profile Selection Card
+bool RenderProfileCard(int id, const char* name, const char* subtitle, const char* desc, ImVec4 accentColor, ImVec2 size) {
     ImGuiWindow* window = ImGui::GetCurrentWindow();
     if (window->SkipItems) return false;
 
@@ -94,23 +139,20 @@ bool AnimatedModeButton(int id, const char* label, const char* sublabel, ImVec4 
     ImVec2 pos = window->DC.CursorPos;
     
     char str_id[32];
-    sprintf(str_id, "##mode_btn_%d", id);
+    sprintf(str_id, "##profile_card_%d", id);
 
-    // 1. Invisible Button เพื่อทำ Hitbox รับการคลิกที่ถูกต้อง 100%
     bool pressed = ImGui::InvisibleButton(str_id, size);
     bool hovered = ImGui::IsItemHovered();
     
     ModeAnimState& anim = g_AnimStates[id];
-    bool isSelected = (g_CurrentMode == id); // ตรวจสอบว่าโหมดนี้กำลังถูกเลือกค้างอยู่หรือไม่
+    bool isSelected = (g_CurrentMode == id);
 
-    // 2. Smooth Hover Interpolation
     float delta = g.IO.DeltaTime * 12.0f;
     anim.hoverAnim = ImLerp(anim.hoverAnim, (hovered || isSelected) ? 1.0f : 0.0f, ImClamp(delta, 0.0f, 1.0f));
 
-    // 3. Logic เมื่อมีการกดปุ่ม
     if (pressed && !anim.isApplying) {
         anim.isApplying = true;
-        anim.applyTimer = 0.35f; // เวลาหมุน Spinner (0.35 วินาที ลื่นกำลังดี)
+        anim.applyTimer = 0.30f; 
     }
 
     if (anim.isApplying) {
@@ -118,7 +160,7 @@ bool AnimatedModeButton(int id, const char* label, const char* sublabel, ImVec4 
         if (anim.applyTimer <= 0.0f) {
             anim.isApplying = false;
             anim.justSuccess = true;
-            anim.successTimer = 1.0f; // แสดงเครื่องหมายติ๊กถูก 1 วินาที
+            anim.successTimer = 0.8f; 
             ApplyPoolCueBoost((BoostMode)id);
         }
     }
@@ -130,42 +172,35 @@ bool AnimatedModeButton(int id, const char* label, const char* sublabel, ImVec4 
         }
     }
 
-    // 4. Render Visual Highlights (Background, Hold Glow, Border)
     ImRect bb(pos, ImVec2(pos.x + size.x, pos.y + size.y));
 
-    // สีพื้นหลัง (ถ้าถูกเลือกจะสว่างค้างเข้มขึ้น)
     ImVec4 baseColor = isSelected 
-        ? ImVec4(accentColor.x * 0.25f, accentColor.y * 0.25f, accentColor.z * 0.25f, 0.90f)
-        : ImLerp(ImVec4(0.10f, 0.11f, 0.14f, 0.85f), ImVec4(0.16f, 0.18f, 0.23f, 0.95f), anim.hoverAnim);
+        ? ImVec4(accentColor.x * 0.22f, accentColor.y * 0.22f, accentColor.z * 0.22f, 0.90f)
+        : ImLerp(ImVec4(0.10f, 0.11f, 0.14f, 0.85f), ImVec4(0.15f, 0.17f, 0.22f, 0.95f), anim.hoverAnim);
 
-    window->DrawList->AddRectFilled(bb.Min, bb.Max, ImGui::GetColorU32(baseColor), 8.0f);
+    window->DrawList->AddRectFilled(bb.Min, bb.Max, ImGui::GetColorU32(baseColor), 10.0f);
 
-    // แถบ Glow ด้านข้าง + เส้นขอบ (จะสว่างค้างเมื่อถูก Hold Selection)
     if (anim.hoverAnim > 0.01f || isSelected) {
-        float barWidth = isSelected ? 6.0f : ImLerp(2.0f, 5.0f, anim.hoverAnim);
+        float barWidth = isSelected ? 5.0f : ImLerp(2.0f, 4.0f, anim.hoverAnim);
         ImU32 glowColor = ImGui::GetColorU32(accentColor);
         
-        // Left Selection Bar
         window->DrawList->AddRectFilled(
             bb.Min, 
             ImVec2(bb.Min.x + barWidth, bb.Max.y), 
-            glowColor, 8.0f, ImDrawFlags_RoundCornersLeft);
+            glowColor, 10.0f, ImDrawFlags_RoundCornersLeft);
 
-        // Border Glow
-        float alpha = isSelected ? 0.8f : anim.hoverAnim * 0.5f;
+        float alpha = isSelected ? 0.8f : anim.hoverAnim * 0.4f;
         window->DrawList->AddRect(
             bb.Min, bb.Max, 
             ImGui::GetColorU32(ImVec4(accentColor.x, accentColor.y, accentColor.z, alpha)), 
-            8.0f, 0, 1.5f);
+            10.0f, 0, 1.2f);
     }
 
-    // 5. Render Spinner / Checkmark / Text
-    ImVec2 textPos = ImVec2(bb.Min.x + 18.0f, bb.Min.y + 8.0f);
+    ImVec2 textPos = ImVec2(bb.Min.x + 16.0f, bb.Min.y + 8.0f);
 
     if (anim.isApplying) {
-        // --- SPINNER ---
-        float radius = 9.0f;
-        ImVec2 center = ImVec2(bb.Max.x - 28.0f, bb.Min.y + size.y * 0.5f);
+        float radius = 8.0f;
+        ImVec2 center = ImVec2(bb.Max.x - 24.0f, bb.Min.y + 20.0f);
         float time = (float)g.Time * 10.0f;
         window->DrawList->PathClear();
         for (int i = 0; i < 16; i++) {
@@ -173,56 +208,52 @@ bool AnimatedModeButton(int id, const char* label, const char* sublabel, ImVec4 
             window->DrawList->PathLineTo(ImVec2(center.x + cosf(a) * radius, center.y + sinf(a) * radius));
         }
         window->DrawList->PathStroke(ImGui::GetColorU32(accentColor), false, 2.5f);
-
-        window->DrawList->AddText(textPos, IM_COL32(240, 240, 245, 255), label);
-        window->DrawList->AddText(ImVec2(textPos.x, textPos.y + 18.0f), IM_COL32(130, 135, 150, 255), sublabel);
     } 
     else if (anim.justSuccess) {
-        // --- CHECKMARK ---
-        ImVec2 center = ImVec2(bb.Max.x - 28.0f, bb.Min.y + size.y * 0.5f);
+        ImVec2 center = ImVec2(bb.Max.x - 24.0f, bb.Min.y + 20.0f);
         ImU32 greenColor = IM_COL32(40, 210, 90, 255);
-        window->DrawList->AddCircleFilled(center, 10.0f, greenColor);
+        window->DrawList->AddCircleFilled(center, 9.0f, greenColor);
         window->DrawList->AddLine(ImVec2(center.x - 4, center.y), ImVec2(center.x - 1, center.y + 3), IM_COL32(255, 255, 255, 255), 2.0f);
         window->DrawList->AddLine(ImVec2(center.x - 1, center.y + 3), ImVec2(center.x + 4, center.y - 3), IM_COL32(255, 255, 255, 255), 2.0f);
-
-        window->DrawList->AddText(textPos, IM_COL32(240, 240, 245, 255), label);
-        window->DrawList->AddText(ImVec2(textPos.x, textPos.y + 18.0f), IM_COL32(130, 135, 150, 255), sublabel);
-    } 
-    else {
-        // --- NORMAL / HOLD TEXT ---
-        ImU32 titleColor = isSelected ? IM_COL32(255, 255, 255, 255) : IM_COL32(220, 222, 230, 255);
-        window->DrawList->AddText(textPos, titleColor, label);
-        window->DrawList->AddText(ImVec2(textPos.x, textPos.y + 18.0f), IM_COL32(130, 135, 150, 255), sublabel);
     }
+
+    ImU32 titleColor = isSelected ? IM_COL32(255, 255, 255, 255) : IM_COL32(220, 225, 235, 255);
+    window->DrawList->AddText(textPos, titleColor, name);
+    window->DrawList->AddText(ImVec2(textPos.x + ImGui::CalcTextSize(name).x + 10.0f, textPos.y + 1.0f), IM_COL32(140, 145, 160, 255), subtitle);
+    window->DrawList->AddText(ImVec2(textPos.x, textPos.y + 20.0f), IM_COL32(120, 125, 140, 255), desc);
 
     return pressed;
 }
 
 // ---------------------------------------------------------
-// Style Config
+// Global UI Theme Configuration
 // ---------------------------------------------------------
 void SetupModernStyle() {
     ImGuiStyle& style = ImGui::GetStyle();
 
-    style.WindowRounding    = 16.0f;
-    style.ChildRounding     = 12.0f;
-    style.FrameRounding     = 8.0f;
-    style.WindowPadding     = ImVec2(20, 20);
+    style.WindowRounding    = 14.0f;
+    style.ChildRounding     = 10.0f;
+    style.FrameRounding     = 6.0f;
+    style.PopupRounding     = 8.0f;
+    style.WindowPadding     = ImVec2(16, 16);
     style.ItemSpacing       = ImVec2(10, 10);
     style.WindowBorderSize  = 0.0f;
 
     ImVec4* colors = style.Colors;
-    colors[ImGuiCol_WindowBg]           = ImVec4(0.06f, 0.06f, 0.08f, 0.96f);
-    colors[ImGuiCol_ChildBg]            = ImVec4(0.09f, 0.10f, 0.13f, 0.80f);
+    colors[ImGuiCol_WindowBg]           = ImVec4(0.07f, 0.08f, 0.10f, 0.96f);
+    colors[ImGuiCol_ChildBg]            = ImVec4(0.09f, 0.10f, 0.13f, 0.70f);
     colors[ImGuiCol_SliderGrab]         = ImVec4(0.95f, 0.75f, 0.18f, 1.00f);
     colors[ImGuiCol_SliderGrabActive]   = ImVec4(1.00f, 0.85f, 0.25f, 1.00f);
     colors[ImGuiCol_FrameBg]            = ImVec4(0.12f, 0.13f, 0.17f, 1.00f);
     colors[ImGuiCol_FrameBgHovered]     = ImVec4(0.18f, 0.20f, 0.26f, 1.00f);
+    colors[ImGuiCol_Button]             = ImVec4(0.12f, 0.13f, 0.17f, 1.00f);
+    colors[ImGuiCol_ButtonHovered]      = ImVec4(0.18f, 0.20f, 0.26f, 1.00f);
+    colors[ImGuiCol_ButtonActive]       = ImVec4(0.24f, 0.27f, 0.35f, 1.00f);
     colors[ImGuiCol_Text]               = ImVec4(0.92f, 0.93f, 0.96f, 1.00f);
 }
 
 // ---------------------------------------------------------
-// Custom UI Renderer
+// Main UI Rendering Engine
 // ---------------------------------------------------------
 void RenderPoolCueBoosterGUI(HWND hwnd) {
     ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -234,77 +265,167 @@ void RenderPoolCueBoosterGUI(HWND hwnd) {
         ImGuiWindowFlags_NoMove | 
         ImGuiWindowFlags_NoCollapse);
 
-    // Header Title & Window Drag Area
+    // --- TOP BAR: Header & Window Controls ---
     ImGui::BeginGroup();
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.00f, 0.82f, 0.20f, 1.0f));
-    ImGui::TextUnformatted("⚡ POOL CUE ULTRA BOOSTER v2.0");
+    ImGui::TextUnformatted("⚡ POOL CUE ENGINE");
     ImGui::PopStyleColor();
-    ImGui::SameLine(ImGui::GetWindowWidth() - 35);
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.40f, 0.43f, 0.50f, 1.0f), "v2.0");
 
-    // Exit Button
+    // Right-aligned Window Buttons
+    float winWidth = ImGui::GetWindowWidth();
+    ImGui::SameLine(winWidth - 60);
+
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f, 0.2f, 0.25f, 0.8f));
+    if (ImGui::Button("-", ImVec2(24, 24))) {
+        ::ShowWindow(hwnd, SW_MINIMIZE);
+    }
+    ImGui::SameLine();
+    ImGui::PopStyleColor();
+
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.2f, 0.2f, 0.8f));
-    if (ImGui::Button("X", ImVec2(25, 25))) {
+    if (ImGui::Button("X", ImVec2(24, 24))) {
         ::PostQuitMessage(0);
     }
     ImGui::PopStyleColor(2);
     ImGui::EndGroup();
 
+    // Drag Window Behavior
     if (ImGui::IsItemHovered() && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         ::ReleaseCapture();
         ::SendMessage(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
     }
 
-    ImGui::TextColored(ImVec4(0.45f, 0.48f, 0.55f, 1.0f), "Memory Native Engine Overdrive");
-    ImGui::Separator();
     ImGui::Spacing();
 
-    // Engine Status
-    ImGui::BeginChild("StatusPanel", ImVec2(0, 56), true);
-    {
-        ImGui::Text("STATUS:");
-        ImGui::SameLine();
-        if (g_IsActive) {
-            ImGui::TextColored(g_BoostConfigs[g_CurrentMode].color, "[ ACTIVE - %s ]", g_BoostConfigs[g_CurrentMode].name);
-            ImGui::TextColored(ImVec4(0.6f, 0.65f, 0.75f, 1.0f), "Profile: %s", g_BoostConfigs[g_CurrentMode].subtitle);
+    // --- NAVIGATION TABS ---
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 0));
+    const char* tabs[] = { " Dashboard ", " Profiles ", " Fine Tuning " };
+    for (int i = 0; i < 3; i++) {
+        bool isTabActive = (g_CurrentTab == i);
+        if (isTabActive) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.68f, 0.15f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.05f, 0.05f, 0.05f, 1.00f));
         } else {
-            ImGui::TextColored(ImVec4(0.45f, 0.48f, 0.55f, 1.0f), "[ STANDBY / INACTIVE ]");
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.11f, 0.12f, 0.15f, 0.80f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.70f, 0.72f, 0.78f, 1.00f));
         }
+
+        if (ImGui::Button(tabs[i], ImVec2(120, 32))) {
+            g_CurrentTab = i;
+        }
+        ImGui::PopStyleColor(2);
+        if (i < 2) ImGui::SameLine();
     }
-    ImGui::EndChild();
+    ImGui::PopStyleVar();
 
-    ImGui::Spacing();
-    ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.18f, 1.00f), "SELECT BOOST PROFILE:");
-
-    // Render Mode Buttons (Now Work 100% & Hold Selection)
-    for (int i = 1; i <= 5; ++i) {
-        AnimatedModeButton(
-            i, 
-            g_BoostConfigs[i].name, 
-            g_BoostConfigs[i].subtitle, 
-            g_BoostConfigs[i].color, 
-            ImVec2(-1, 46)
-        );
-    }
-
-    ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
 
-    // Live Adjustment Sliders
-    ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.18f, 1.00f), "LIVE TUNING SLIDERS:");
-    ImGui::SliderFloat("Force Multiplier", &g_CustomForce, 1.0f, 10.0f, "%.2fx Force");
-    ImGui::SliderFloat("Speed Multiplier", &g_CustomSpeed, 1.0f, 3.0f, "%.2fx Speed");
+    // --- TAB 0: DASHBOARD OVERVIEW ---
+    if (g_CurrentTab == 0) {
+        ImGui::BeginChild("DashboardTab", ImVec2(0, 0), false);
 
-    ImGui::Spacing();
+        // Status Card
+        ImGui::BeginChild("StatusCard", ImVec2(0, 80), true);
+        {
+            ImGui::TextColored(ImVec4(0.5f, 0.53f, 0.6f, 1.0f), "SYSTEM STATE");
+            ImGui::SameLine(ImGui::GetWindowWidth() - 110);
+            
+            bool tempActive = g_IsActive;
+            if (RenderToggleSwitch("##MasterSwitch", &tempActive)) {
+                if (!tempActive) ApplyPoolCueBoost(MODE_OFF);
+                else ApplyPoolCueBoost(MODE_LOW);
+            }
 
-    // System Reset
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f, 0.12f, 0.15f, 0.70f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.90f, 0.18f, 0.22f, 1.00f));
-    if (ImGui::Button("SYSTEM RESET & FLUSH MEMORY", ImVec2(-1, 40))) {
-        ApplyPoolCueBoost(MODE_SYSTEM_RESET);
+            if (g_IsActive) {
+                ImGui::TextColored(g_BoostConfigs[g_CurrentMode].color, "● %s PROFILE ACTIVE", g_BoostConfigs[g_CurrentMode].name);
+                ImGui::TextColored(ImVec4(0.7f, 0.73f, 0.8f, 1.0f), "Active Force: %.2fx | Active Speed: %.2fx", g_CustomForce, g_CustomSpeed);
+            } else {
+                ImGui::TextColored(ImVec4(0.45f, 0.48f, 0.55f, 1.0f), "○ ENGINE STANDBY / INACTIVE");
+                ImGui::TextColored(ImVec4(0.40f, 0.43f, 0.50f, 1.0f), "Select a profile or toggle switch to enable.");
+            }
+        }
+        ImGui::EndChild();
+
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.18f, 1.00f), "QUICK PROFILE SELECTOR:");
+        
+        // Show Top 3 Popular Profiles
+        for (int i = 1; i <= 3; ++i) {
+            RenderProfileCard(
+                i, 
+                g_BoostConfigs[i].name, 
+                g_BoostConfigs[i].subtitle, 
+                g_BoostConfigs[i].description,
+                g_BoostConfigs[i].color, 
+                ImVec2(-1, 50)
+            );
+            ImGui::Spacing();
+        }
+
+        ImGui::EndChild();
     }
-    ImGui::PopStyleColor(2);
+
+    // --- TAB 1: ALL PROFILES ---
+    else if (g_CurrentTab == 1) {
+        ImGui::BeginChild("ProfilesTab", ImVec2(0, 0), false);
+        ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.18f, 1.00f), "ALL POWER PROFILES:");
+        ImGui::Spacing();
+
+        for (int i = 1; i <= 5; ++i) {
+            RenderProfileCard(
+                i, 
+                g_BoostConfigs[i].name, 
+                g_BoostConfigs[i].subtitle, 
+                g_BoostConfigs[i].description,
+                g_BoostConfigs[i].color, 
+                ImVec2(-1, 52)
+            );
+            ImGui::Spacing();
+        }
+
+        ImGui::EndChild();
+    }
+
+    // --- TAB 2: FINE TUNING & RESET ---
+    else if (g_CurrentTab == 2) {
+        ImGui::BeginChild("TuningTab", ImVec2(0, 0), false);
+        
+        ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.18f, 1.00f), "MANUAL MULTIPLIER TUNING:");
+        ImGui::Spacing();
+
+        ImGui::BeginChild("SliderGroup", ImVec2(0, 140), true);
+        {
+            ImGui::Text("Force Impact Multiplier");
+            ImGui::SliderFloat("##ForceSlider", &g_CustomForce, 1.0f, 10.0f, "%.2fx Force");
+            ImGui::TextColored(ImVec4(0.45f, 0.48f, 0.55f, 1.0f), "Controls physical impulse strength on collision.");
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::Text("Movement Speed Multiplier");
+            ImGui::SliderFloat("##SpeedSlider", &g_CustomSpeed, 1.0f, 3.0f, "%.2fx Speed");
+            ImGui::TextColored(ImVec4(0.45f, 0.48f, 0.55f, 1.0f), "Amplifies directional velocity dynamics.");
+        }
+        ImGui::EndChild();
+
+        ImGui::Spacing();
+        ImGui::Spacing();
+
+        ImGui::TextColored(ImVec4(0.95f, 0.30f, 0.30f, 1.00f), "DANGER ZONE:");
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.60f, 0.12f, 0.15f, 0.70f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.18f, 0.22f, 1.00f));
+        if (ImGui::Button("SYSTEM RESET & FLUSH MEMORY HOOKS", ImVec2(-1, 42))) {
+            ApplyPoolCueBoost(MODE_SYSTEM_RESET);
+        }
+        ImGui::PopStyleColor(2);
+
+        ImGui::EndChild();
+    }
 
     ImGui::End();
 }
@@ -314,7 +435,7 @@ void SetupSmoothFonts(ImGuiIO& io) {
     font_cfg.OversampleH = 4;
     font_cfg.OversampleV = 4;
 
-    ImFont* font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 17.0f, &font_cfg);
+    ImFont* font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 16.0f, &font_cfg);
     if (!font) io.Fonts->AddFontDefault(&font_cfg);
 }
 
@@ -330,7 +451,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         wc.lpszClassName, 
         L"POOL CUE ULTRA BOOSTER v2.0", 
         WS_POPUP | WS_VISIBLE, 
-        200, 200, 480, 580, 
+        200, 200, 480, 440, 
         nullptr, nullptr, wc.hInstance, nullptr
     );
 
